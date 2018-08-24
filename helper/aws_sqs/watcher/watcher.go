@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -50,7 +51,13 @@ func processMessage(svc *sqs.SQS, url string, m *sqs.Message, runner *btrunner.B
 	}
 
 	done := make(chan struct{}, 1)
+	deleting := false
+	mutex := sync.Mutex{}
 	callback := func(err error) {
+		mutex.Lock()
+		deleting = true
+		mutex.Unlock()
+
 		if err != nil {
 			log.Printf("[ERROR] [%s][%s] task failed. err: %v", messageID, name, err)
 		} else {
@@ -77,7 +84,11 @@ func processMessage(svc *sqs.SQS, url string, m *sqs.Message, runner *btrunner.B
 	for {
 		select {
 		case <-ticker.C:
-			extendVisibilityTimeout(svc, url, m, messageID, name)
+			mutex.Lock()
+			if !deleting {
+				extendVisibilityTimeout(svc, url, m, messageID, name)
+			}
+			mutex.Unlock()
 		case <-done:
 			return
 		}
