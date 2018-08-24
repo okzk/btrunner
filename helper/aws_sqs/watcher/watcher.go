@@ -2,6 +2,8 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/sqs"
@@ -37,24 +39,31 @@ func Watch(ctx context.Context, svc *sqs.SQS, url string, runner *btrunner.Batch
 }
 
 func processMessage(svc *sqs.SQS, url string, m *sqs.Message, runner *btrunner.BatchingTaskRunner) {
-	name := aws.StringValue(m.Body)
 	messageID := aws.StringValue(m.MessageId)
+	name, err := extractTaskName(m)
+	if err != nil {
+		log.Printf("[ERROR] [%s][unknown] failed to extract task name. err: %v", messageID, err)
+
+		// the message is not retryable.
+		deleteMessage(svc, url, m, messageID, "unknown")
+		return
+	}
 
 	done := make(chan struct{}, 1)
 	callback := func(err error) {
 		if err != nil {
 			log.Printf("[ERROR] [%s][%s] task failed. err: %v", messageID, name, err)
 		} else {
-			deleteMessage(svc, url, m)
+			deleteMessage(svc, url, m, messageID, name)
 		}
 		close(done)
 	}
 
-	err := runner.EnqueueTask(name, callback)
+	err = runner.EnqueueTask(name, callback)
 	if err != nil {
 		if err == btrunner.ErrorAlreadyEnqueued {
 			log.Printf("[INFO] [%s][%s] task is batched", messageID, name)
-			deleteMessage(svc, url, m)
+			deleteMessage(svc, url, m, messageID, name)
 		} else {
 			log.Printf("[WARN] [%s][%s] fail to enqueue. err: %v", messageID, name, err)
 		}
@@ -68,17 +77,14 @@ func processMessage(svc *sqs.SQS, url string, m *sqs.Message, runner *btrunner.B
 	for {
 		select {
 		case <-ticker.C:
-			extendVisibilityTimeout(svc, url, m)
+			extendVisibilityTimeout(svc, url, m, messageID, name)
 		case <-done:
 			return
 		}
 	}
 }
 
-func deleteMessage(svc *sqs.SQS, url string, m *sqs.Message) {
-	name := aws.StringValue(m.Body)
-	messageID := aws.StringValue(m.MessageId)
-
+func deleteMessage(svc *sqs.SQS, url string, m *sqs.Message, messageID, name string) {
 	log.Printf("[INFO] [%s][%s] deleting a sqs message", messageID, name)
 
 	_, err := svc.DeleteMessage(&sqs.DeleteMessageInput{
@@ -90,10 +96,7 @@ func deleteMessage(svc *sqs.SQS, url string, m *sqs.Message) {
 	}
 }
 
-func extendVisibilityTimeout(svc *sqs.SQS, url string, m *sqs.Message) {
-	name := aws.StringValue(m.Body)
-	messageID := aws.StringValue(m.MessageId)
-
+func extendVisibilityTimeout(svc *sqs.SQS, url string, m *sqs.Message, messageID, name string) {
 	log.Printf("[DEBUG] [%s][%s] extending visibility timeout", messageID, name)
 	_, err := svc.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          aws.String(url),
@@ -117,4 +120,27 @@ func WatchUntilSignaled(svc *sqs.SQS, url string, runner *btrunner.BatchingTaskR
 	}()
 
 	return Watch(ctx, svc, url, runner)
+}
+
+func extractTaskName(m *sqs.Message) (string, error) {
+	body := aws.StringValue(m.Body)
+
+	var v interface{}
+	err := json.Unmarshal([]byte(body), &v)
+	if err != nil {
+		// body is not a json. so consider it as a raw task name.
+		return body, nil
+	}
+	switch vv := v.(type) {
+	case string:
+		// simple json string.
+		return vv, nil
+	case map[string]interface{}:
+		// Consider body as an SNS message, and use it's `Message` as a task name.
+		if msg, ok := vv["Message"].(string); ok {
+			return msg, nil
+		}
+	}
+
+	return "", errors.New("fail to parse body")
 }
