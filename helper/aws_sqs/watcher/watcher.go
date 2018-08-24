@@ -124,9 +124,10 @@ func extendVisibilityTimeout(svc *sqs.SQS, url string, m *sqs.Message, messageID
 func WatchUntilSignaled(svc *sqs.SQS, url string, runner *btrunner.BatchingTaskRunner) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-		<-sig
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+		sig := <-ch
+		log.Printf("[INFO] recieved a '%s' signal.", sig)
 		cancel()
 	}()
 
