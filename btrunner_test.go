@@ -1,6 +1,7 @@
 package btrunner
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -8,7 +9,7 @@ import (
 
 const testJobTimeUnit = time.Millisecond * 100
 
-func taskImpl() error {
+func taskImpl(_ context.Context) error {
 	time.Sleep(testJobTimeUnit)
 	return nil
 }
@@ -179,6 +180,36 @@ func TestMultiTask(t *testing.T) {
 
 	d := time.Now().Sub(startAt)
 	if d < testJobTimeUnit*3 || testJobTimeUnit*3+testJobTimeUnit/2 < d {
+		t.Fatalf("unexpected elapse time: %d", d)
+	}
+}
+
+func TestCancellationOnDisposing(t *testing.T) {
+	runner := New(1)
+	runner.RegisterTask("t", testJobTimeUnit, func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(testJobTimeUnit):
+			return nil
+		}
+	})
+
+	startAt := time.Now()
+	err := runner.EnqueueTask("t", func(err error) {
+		if err == nil {
+			t.Fatal("unexpected nil error")
+		}
+	})
+	if err != nil {
+		t.Fatal("fail to enqueue:", err)
+	}
+
+	time.Sleep(testJobTimeUnit / 4)
+	runner.Dispose()
+
+	d := time.Now().Sub(startAt)
+	if d >= testJobTimeUnit/2 {
 		t.Fatalf("unexpected elapse time: %d", d)
 	}
 }

@@ -1,6 +1,7 @@
 package btrunner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -11,6 +12,9 @@ import (
 type BatchingTaskRunner struct {
 	taskMap   map[string]*task
 	semaphore chan struct{}
+
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	mutex     sync.Mutex
 	disposed  bool
@@ -25,7 +29,7 @@ var ErrorAlreadyEnqueued = errors.New("task is already enqueued")
 var ErrorDisposed = errors.New("task runner has been disposed")
 
 type task struct {
-	impl     func() error
+	impl     func(ctx context.Context) error
 	callback func(err error)
 
 	signal   chan struct{}
@@ -50,7 +54,7 @@ func (b *BatchingTaskRunner) runTaskWorker(t *task) {
 				t.callback = nil
 				t.mutex.Unlock()
 
-				callback(t.impl())
+				callback(t.impl(b.ctx))
 				<-b.semaphore
 			case <-b.disposing:
 				t.mutex.Lock()
@@ -87,7 +91,10 @@ func (b *BatchingTaskRunner) runTaskWorker(t *task) {
 
 // New creates a new BatchingTaskRunner.
 func New(concurrency int) *BatchingTaskRunner {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &BatchingTaskRunner{
+		ctx:       ctx,
+		cancel:    cancel,
 		taskMap:   make(map[string]*task),
 		semaphore: make(chan struct{}, concurrency),
 		disposing: make(chan struct{}),
@@ -107,13 +114,14 @@ func (b *BatchingTaskRunner) Dispose() {
 	for _, t := range b.taskMap {
 		close(t.signal)
 	}
+	b.cancel()
 	for _, t := range b.taskMap {
 		t.wg.Wait()
 	}
 }
 
 // RegisterTask registers a new task.
-func (b *BatchingTaskRunner) RegisterTask(name string, coolDown time.Duration, impl func() error) {
+func (b *BatchingTaskRunner) RegisterTask(name string, coolDown time.Duration, impl func(ctx context.Context) error) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	if b.disposed {
